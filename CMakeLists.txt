@@ -14,9 +14,10 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(OpenCV REQUIRED)
 find_package(CUDA REQUIRED)
 
-link_libraries(${OpenCV2_LIBS} )
+link_libraries(${OpenCV_LIBS} )
 include_directories(/usr/local/cuda/samples/common/inc)
 
+set (CMAKE_CXX_STANDARD 11)
 set (EXECUTABLE_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/bin/")
 
 if(OPENCV2_FOUND)
@@ -51,7 +52,7 @@ if(CUDA_FOUND)
   set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} "-G")
 
   add_subdirectory (hw1)
-  # add_subdirectory (hw2)
+  add_subdirectory (hw2)
   # add_subdirectory (hw3)
   # add_subdirectory (hw4)
   # add_subdirectory (hw5)
