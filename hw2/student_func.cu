@@ -122,8 +122,8 @@ void gaussian_blur(const unsigned char* const inputChannel,
   pos2dClamped.x = clamp(pos2d.x, 0, numCols - 1);
   pos2dClamped.y = clamp(pos2d.y, 0, numRows - 1);
   const int pos = pos2dClamped.y * numCols + pos2dClamped.x;
-  const int posLocal = blockDim.x * threadIdx.y + threadIdx.x;
-  tile[posLocal] = inputChannel[pos];
+  const int posShared = blockDim.x * threadIdx.y + threadIdx.x;
+  tile[posShared] = inputChannel[pos];
   __syncthreads();
 
   // Don't process outside of the entire image
@@ -136,12 +136,12 @@ void gaussian_blur(const unsigned char* const inputChannel,
   for (int fy = 0; fy < filterWidth; ++fy) {
     for (int fx = 0; fx < filterWidth; ++fx) {
       const int filterOffset = filterWidth * fy + fx;
-      const int localOffset = (fy - r) * blockDim.x + (fx - r);
-      conv += filter[filterOffset] * tile[posLocal + localOffset];
+      const int sharedOffset = (fy - r) * blockDim.x + (fx - r);
+      conv += filter[filterOffset] * tile[posShared + sharedOffset];
     }
   }
   outputChannel[pos] = conv;
-  //  outputChannel[pos] = tile[posLocal];
+  //  outputChannel[pos] = tile[posShared];
 }
 
 #else
