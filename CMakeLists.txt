@@ -50,12 +50,13 @@ if(CUDA_FOUND)
   endif (UNIX)
 
   # add debugging to CUDA NVCC flags.  For NVidia's NSight tools.
-  set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} "-G")
+  # NOTE: Thrust didn't work with -G option
+  #  set(CUDA_NVCC_FLAGS_DEBUG ${CUDA_NVCC_FLAGS_DEBUG} "-G")
 
   add_subdirectory (hw1)
   add_subdirectory (hw2)
   add_subdirectory (hw3)
-  # add_subdirectory (hw4)
+  add_subdirectory (hw4)
   # add_subdirectory (hw5)
   # add_subdirectory (hw6)
 else(CUDA_FOUND)
