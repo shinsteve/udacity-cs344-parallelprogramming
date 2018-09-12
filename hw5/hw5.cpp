@@ -1,47 +1,53 @@
-//Udacity HW 4
-//Radix Sorting
+__global__
+void histo_kernel_32bin(const unsigned int *const d_vals,
+                        unsigned int* const d_histo,
+                        const unsigned int factor,
+                        const unsigned int numElemPerThread,
+                        const unsigned int numElems) {
+    extern __shared__ uint32_t s_histo[];
+    const int numBins = 32;
+    uint8_t l_histo[numBins];
+    const int tid = threadIdx.x;
 
-#include <stdio.h>
-#include "utils.h"
-// #include <thrust/host_vector.h>
+    if (tid < numBins) s_histo[tid] = 0;
+    memset(l_histo, 0, sizeof(uint8_t) * numBins);
+    __syncthreads();
 
-/* Red Eye Removal
-   ===============
-   
-   For this assignment we are implementing red eye removal.  This is
-   accomplished by first creating a score for every pixel that tells us how
-   likely it is to be a red eye pixel.  We have already done this for you - you
-   are receiving the scores and need to sort them in ascending order so that we
-   know which pixels to alter to remove the red eye.
+    int pos = blockDim.x * numElemPerThread * blockIdx.x + threadIdx.x;
+    for (int i = 0; i < numElemPerThread; ++i) {
+        if (pos >= numElem) break;
+        int bin = d_vals[pos] >> factor;  // Optimization based on assumption
+        l_histo[bin]++
+        pos += blockDim.x;
+    }
+    // Local to Shared
+    for (int i = 0; i < numBins; ++i) {
+        atomicAdd(&s_histo[i], l_histo[i]);
+    }
+    __syncthreads();
 
-   Note: ascending order == smallest to largest
+    // Shared to Global
+    if (tid < numBins) {
+        atomicAdd(&d_histo[tid], s_histo[tid]);
+    }
+}
 
-   Each score is associated with a position, when you sort the scores, you must
-   also move the positions accordingly.
-
-   Implementing Parallel Radix Sort with CUDA
-   ==========================================
-
-   The basic idea is to construct a histogram on each pass of how many of each
-   "digit" there are.   Then we scan this histogram so that we know where to put
-   the output of each digit.  For example, the first 1 must come after all the
-   0s so we have to know how many 0s there are to be able to start moving 1s
-   into the correct position.
-
-   1) Histogram of the number of occurrences of each digit
-   2) Exclusive Prefix Sum of Histogram
-   3) Determine relative offset of each digit
-        For example [0 0 1 1 0 0 1]
-                ->  [0 1 0 1 2 3 2]
-   4) Combine the results of steps 2 & 3 to determine the final
-      output location for each element and move it there
-
-   LSB Radix sort is an out-of-place sort and you will need to ping-pong values
-   between the input and output buffers we have provided.  Make sure the final
-   sorted results end up in the output buffer!  Hint: You may need to do a copy
-   at the end.
-
- */
+void makeHistoSmallBin(unsigned int* const d_vals,
+                       unsigned int* const d_histo,
+                       const size_t numBins,
+                       const int factor,
+                       const size_t numElems) {
+    checkCudaErrors(cudaMemset(d_histo, 0, sizeof(unsigned int) * numElems));
+    const int numThreads = 1024;
+    const int numElemPerThread = 255;  // To make size of 1 bin to be 1 byte
+    const int numElemPerBlock = numElemPerThread * numThreads;
+    const int numBlocks = (numElems + numElemPerBlock - 1) / numElemPerBlock;
+    printf("makeHistoSmallBin(): numBlocks: %d, numThreads: %d\n", numBlocks, numThreads);
+    size_t shmSize = sizeof(uint32_t) * numThreads;
+    histo_kernel_32bin<<<numBlocks, numThreads, shmSize>>>
+        (d_vals, d_histo, factor, numElemPerThread, numElems);
+    cudaDeviceSynchronize();  checkCudaErrors(cudaGetLastError());
+}
 
 __global__
 void predicate_kernel(const uint32_t* const d_in,
@@ -124,7 +130,7 @@ void prefix_sum_block_kernel(const uint8_t* const d_in,
     if (pos >= elemNum) return;
 
     extern __shared__ unsigned int s_buf[];  // double buffer
-    const size_t num = blockIdx.x == gridDim.x - 1 ? elemNum - blockIdx.x * blockDim.x : blockDim.x;
+    const size_t num = blockIdx.x == gridDim.x ? elemNum - blockIdx.x * blockDim.x : blockDim.x;
     unsigned int* bufs[2] = {&s_buf[0], &s_buf[num]};
     int toggle = 1;
     unsigned int* inbuf = bufs[0];
@@ -173,8 +179,8 @@ void calc_dest_kernel(const uint8_t* d_predicate,
 }
 
 __global__
-void move_kernel(const uint32_t* const d_inputVals, const uint32_t* const d_inputPos,
-                 uint32_t* const d_outputVals, uint32_t* const d_outputPos,
+void move_kernel(const uint32_t* const d_inputVals,
+                 uint32_t* const d_outputVals,
                  const uint32_t* const d_dest,
                  const size_t numElems) {
     const int pos = blockDim.x * blockIdx.x + threadIdx.x;
@@ -182,7 +188,15 @@ void move_kernel(const uint32_t* const d_inputVals, const uint32_t* const d_inpu
 
     const uint32_t dest = d_dest[pos];
     d_outputVals[dest] = d_inputVals[pos];
-    d_outputPos[dest] = d_inputPos[pos];
+}
+
+__global__
+void shift_kernel(const uint32_t* const d_in, uint32_t* const d_out,
+                  const int factor, const size_t numElems) {
+    const int pos = blockDim.x * blockIdx.x + threadIdx.x;
+    if (pos >= numElems) return;
+    uint32_t val = d_in[pos];
+    d_out[pos] = val & ((1 << factor) - 1);
 }
 
 //#define DEBUGP(_X_, _Y_) debugp(#_X_, _X_, _Y_);
@@ -203,15 +217,14 @@ void debugp(const char* name, T* data, size_t num) {
     printf("\n\n");
 }
 
-void your_sort(unsigned int* const d_inputVals,
-               unsigned int* const d_inputPos,
-               unsigned int* const d_outputVals,
-               unsigned int* const d_outputPos,
-               const size_t numElems)
-{
-    const int numBits = sizeof(uint32_t) * 8;
+void coarseSortAndShift(const unsigned int *const d_inputVals,
+                        unsigned int* const d_outputVals,
+                        const int factor,
+                        const unsigned int numElems) {
+    // Sort by key : val / 32   <=>   val >> factor
+    // Shift val   : val % 32   <=>   val & ((1 << factor) - 1)
+
     const int numThreads = 1024;
-    //  const int numThreads = 4;
     const int numBlocks = (numElems + numThreads - 1) / numThreads;
     printf("numBlocks: %d, numThreads: %d\n", numBlocks, numThreads);
 
@@ -228,20 +241,16 @@ void your_sort(unsigned int* const d_inputVals,
 
     // Ping-pong buffer
     uint32_t* bufVal[2] = {d_inputVals, d_outputVals};
-    uint32_t* bufPos[2] = {d_inputPos, d_outputPos};
     int toggle = 1;
     uint32_t* d_inVal;
-    uint32_t* d_inPos;
     uint32_t* d_outVal;
-    uint32_t* d_outPos;
-    // Radix Sort
-    for (uint32_t bit = 0; bit < numBits; ++bit) {
+    // Radix Sort of coarse version
+    // NOTE: compare bit >= factor
+    for (uint32_t bit = factor; bit < 10; ++bit) {
         // Swap in and out
         toggle = 1 - toggle;
         d_inVal = bufVal[toggle];
-        d_inPos = bufPos[toggle];
         d_outVal = bufVal[1 - toggle];
-        d_outPos = bufPos[1 - toggle];
         DEBUGP(d_inVal, numElems);
 
         // Generate output of predicate. Set True(1) in case digit is 0
@@ -280,16 +289,12 @@ void your_sort(unsigned int* const d_inputVals,
         DEBUGP(d_dest, numElems);
 
         // Move the elements based on the destination
-        move_kernel<<<numBlocks, numThreads>>>(d_inVal, d_inPos,
-                                               d_outVal, d_outPos,
-                                               d_dest, numElems);
+        move_kernel<<<numBlocks, numThreads>>>(d_inVal, d_outVal, d_dest, numElems);
         cudaDeviceSynchronize();  checkCudaErrors(cudaGetLastError());
         DEBUGP(d_outVal, numElems);
     }
-    checkCudaErrors(cudaMemcpy(d_outputVals, d_outVal,
-                               sizeof(uint32_t) * numElems, cudaMemcpyDeviceToDevice));
-    checkCudaErrors(cudaMemcpy(d_outputPos, d_outPos,
-                               sizeof(uint32_t) * numElems, cudaMemcpyDeviceToDevice));
+
+    shift_kernel<<<numBlocks, numThreads>>>(d_outVal, d_outputVals, factor, numElems);
     DEBUGP(d_outputVals, numElems);
 
     checkCudaErrors(cudaFree(d_count));
@@ -297,4 +302,120 @@ void your_sort(unsigned int* const d_inputVals,
     checkCudaErrors(cudaFree(d_predicate));
     checkCudaErrors(cudaFree(d_prefixSum));
     checkCudaErrors(cudaFree(d_dest));
+}
+
+void makeHisto2Pass(const unsigned int *const d_vals,
+                    unsigned int* const d_histo,
+                    const unsigned int numBins,
+                    const unsigned int numElems) {
+    // Calc histo of large bin by using coarse small bin as first pass
+    //
+    // NOTE: This implementation is highly optimized by assuming:
+    //       numBins == 1024 == 2^10
+    //       numBinDivision == 32
+    //       numSubBin == 32 == 2^5
+    const int numRangeBit = 10;
+    const int numDivShiftBit = 5;  // Don't change as the rest of funcs are optimized
+    const int numBinDivision = 1 << numDivShiftBit;
+    if (numBins != 1024) {
+        std::cerr << "Error: numBins is assumed to be 1024, but got: "
+                  << numBins << std::endl;
+        exit(1);
+    }
+    if (numBins % numBinDivision != 0) {
+        std::cerr << "Error: numBins is not multiple of numBinDivision"
+                  << numBins << " % " << numBinDivision << std::endl;
+        exit(1);
+    }
+    const int numSubBin = numBins / numBinDivision;
+
+    // make coarse histogram
+    uint32_t h_coarseHisto[numBinDivision];
+    uint32_t* d_coarseHisto;     // [numBinDivision]
+    checkCudaErrors(cudaMalloc(&d_coarseHisto, sizeof(uint32_t) * numBinDivision));
+    makeHistoSmallBin(d_vals, d_coarseHisto, numBinDivision, numRangeBit - numDivShiftBit, numElems);
+    checkCudaErrors(cudaMemcpy(h_coarseHisto, d_coarseHisto,
+                               sizeof(uint32_t) * numBins, cudaMemcpyDeviceToHost));
+
+    // sort by key of coarse bin location
+    // and shit based on bin location
+    // After this, element is in range [0..31]
+    uint32_t* d_sorted;     // [numElems]
+    checkCudaErrors(cudaMalloc(&d_sorted, sizeof(uint32_t) * numElems));
+    coarseSortAndShift(d_vals, d_sorted, numBinDivision, numElems);
+
+    size_t offset = 0;
+    for (int i = 0; i < numBinDivision; ++i) {
+        makeHistoSmallBin(d_sorted + offset,
+                          d_histo + numSubBin * i,
+                          numDivShiftBit,
+                          h_coarseHisto[i]);
+        offset += h_coarseHisto[i];
+    }
+
+    checkCudaErrors(cudaFree(d_coarseHisto));
+    checkCudaErrors(cudaFree(d_sorted));
+}
+
+__global__
+void histo_kernel_shared(const unsigned int *const d_vals,
+                        unsigned int* const d_histo,
+                        const unsigned int numBins,
+                        const unsigned int numElems) {
+    extern __shared__ unsigned int s_histo[];
+    const int pos = blockDim.x * blockIdx.x + threadIdx.x;
+    const int tid = threadIdx.x;
+
+    if (tid < numBins) s_histo[tid] = 0;
+    __syncthreads();
+
+    if (pos < numElems) {
+        atomicAdd(&s_histo[d_vals[pos]], 1);
+    }
+    __syncthreads();
+
+    if (tid < numBins) atomicAdd(&d_histo[tid], s_histo[tid]);
+}
+
+void makeHistoShm(const unsigned int *const d_vals,
+                  unsigned int* const d_histo,
+                  const unsigned int numBins,
+                  const unsigned int numElems) {
+    const int numThreads = numBins;
+    const int numBlocks = (numElems + numThreads - 1) / numThreads;
+    const size_t shmSize = sizeof(unsigned int) * numBins;
+    histo_kernel_shared<<<numBlocks, numThreads, shmSize>>>
+        (d_vals, d_histo, numBins, numElems);
+    cudaDeviceSynchronize();  checkCudaErrors(cudaGetLastError());
+}
+
+__global__
+void histo_naive_kernel(const unsigned int *const d_vals,
+                        unsigned int* const d_histo,
+                        const unsigned int numBins,
+                        const unsigned int numElems) {
+    const int pos = blockDim.x * blockIdx.x + threadIdx.x;
+    if (pos >= numElems) return;
+
+    atomicAdd(&d_histo[d_vals[pos]], 1);
+}
+
+void makeHistoNaive(const unsigned int *const d_vals,
+                   unsigned int* const d_histo,
+                   const unsigned int numBins,
+                   const unsigned int numElems) {
+    const int numThreads = 1024;
+    const int numBlocks = (numElems + numThreads - 1) / numThreads;
+    histo_naive_kernel<<<numBlocks, numThreads>>>(d_vals, d_histo, numBins, numElems);
+    cudaDeviceSynchronize();  checkCudaErrors(cudaGetLastError());
+}
+
+void computeHistogram(const unsigned int *const d_vals,
+                      unsigned int* const d_histo,
+                      const unsigned int numBins,
+                      const unsigned int numElems) {
+    checkCudaErrors(cudaMemset(d_histo, 0, sizeof(unsigned int) * numElems));
+    makeHistoNaive(d_vals, d_histo, numBins, nuElems);
+    makeHistoShm(d_vals, d_histo, numBins, nuElems);
+    makeHisto2Pass(d_vals, d_histo, numBins, nuElems);
 }
